@@ -1,0 +1,160 @@
+name: PromptAll AppSaz Builder
+run-name: "AppSaz ${{ inputs.build_uuid }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_uuid:
+        description: Build UUID
+        required: true
+        type: string
+      manifest_url:
+        description: Manifest endpoint
+        required: true
+        type: string
+      template_url:
+        description: Android template endpoint
+        required: true
+        type: string
+      callback_url:
+        description: Progress callback endpoint
+        required: true
+        type: string
+      upload_url:
+        description: Artifact upload endpoint
+        required: true
+        type: string
+      keystore_url:
+        description: Signing keystore endpoint
+        required: true
+        type: string
+      build_token:
+        description: One-time build token
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  TOKEN: ${{ inputs.build_token }}
+  CALLBACK_URL: ${{ inputs.callback_url }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Mask temporary token
+        shell: bash
+        run: echo "::add-mask::$TOKEN"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle 9.6
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.6.0'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android platform
+        shell: bash
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Build signed application
+        id: appsaz_build
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          callback() {
+            local status="$1" stage="$2" progress="$3" message="${4:-}"
+            python3 - "$status" "$stage" "$progress" "$message" <<'PY' > callback.json
+          import json,sys
+          print(json.dumps({"status":sys.argv[1],"stage":sys.argv[2],"progress":int(sys.argv[3]),"log":sys.argv[4]},ensure_ascii=False))
+          PY
+            curl -fsS -X POST -H "Content-Type: application/json" -H "X-AppSaz-Build-Token: $TOKEN" --data-binary @callback.json "$CALLBACK_URL" >/dev/null || true
+          }
+          fail() { callback failed failed 100 "GitHub Actions build failed"; }
+          trap fail ERR
+
+          callback building preparing 8 "دریافت تنظیمات ساخت"
+          curl -fsSL -H "X-AppSaz-Build-Token: $TOKEN" "${{ inputs.manifest_url }}" -o manifest.json
+          curl -fsSL -H "X-AppSaz-Build-Token: $TOKEN" "${{ inputs.template_url }}" -o template.zip
+          mkdir -p work && unzip -q template.zip -d work
+          ROOT="$(find work -maxdepth 2 -name settings.gradle -printf '%h\n' | head -n1)"
+          test -n "$ROOT"
+
+          callback building assets 22 "آماده‌سازی قالب و اطلاعات اپ"
+          python3 - "$ROOT" <<'PY'
+          import json,sys,pathlib,html,re
+          root=pathlib.Path(sys.argv[1]); m=json.load(open('manifest.json',encoding='utf-8'))
+          pkg=re.sub(r'[^A-Za-z0-9_.]','',m['package_name'])
+          version=re.sub(r'[^0-9A-Za-z._-]','',str(m.get('version_name','1.0.0')))
+          repl={'__PACKAGE__':pkg,'__VERSION_CODE__':str(max(1,int(m.get('version_code',1)))),'__VERSION_NAME__':version}
+          for rel in ['app/build.gradle','app/src/main/java/ir/promptall/appsaz/MainActivity.java']:
+              p=root/rel; s=p.read_text(encoding='utf-8')
+              for a,b in repl.items(): s=s.replace(a,b)
+              p.write_text(s,encoding='utf-8')
+          (root/'app/src/main/res/values/strings.xml').write_text('<resources>\n<string name="app_name">'+html.escape(m['app_name'],quote=True)+'</string>\n</resources>\n',encoding='utf-8')
+          cfg={k:m.get(k) for k in ['config_url','project_key','website_url','template','primary_color','secondary_color','logo_url','splash_url','branding','features']}
+          (root/'app/src/main/assets/app-config.json').write_text(json.dumps(cfg,ensure_ascii=False,indent=2),encoding='utf-8')
+          PY
+
+          LOGO_URL="$(python3 -c "import json;print(json.load(open('manifest.json')).get('logo_url') or '')")"
+          if [ -n "$LOGO_URL" ]; then
+            rm -f "$ROOT/app/src/main/res/drawable/ic_launcher.xml"
+            curl -fsSL "$LOGO_URL" -o "$ROOT/app/src/main/res/drawable/ic_launcher.webp"
+          fi
+
+          callback building signing 36 "آماده‌سازی امضای نسخه"
+          KS_EXISTS="$(python3 -c "import json;print('1' if json.load(open('manifest.json')).get('signing',{}).get('keystore_exists') else '0')")"
+          KS_PASS="$(python3 -c "import json;print(json.load(open('manifest.json'))['signing']['password'])")"
+          KS_ALIAS="$(python3 -c "import json;print(json.load(open('manifest.json'))['signing'].get('alias','appsaz'))")"
+          if [ "$KS_EXISTS" = "1" ]; then
+            curl -fsSL -H "X-AppSaz-Build-Token: $TOKEN" "${{ inputs.keystore_url }}" -o "$ROOT/appsaz-release.jks"
+          else
+            keytool -genkeypair -v -keystore "$ROOT/appsaz-release.jks" -storepass "$KS_PASS" -keypass "$KS_PASS" -alias "$KS_ALIAS" -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=AppSaz, OU=PromptAll, O=PromptAll, L=Tehran, C=IR"
+            curl -fsS -X POST -H "X-AppSaz-Build-Token: $TOKEN" -F "kind=keystore" -F "file=@$ROOT/appsaz-release.jks" "${{ inputs.upload_url }}" >/dev/null
+          fi
+          cat > "$ROOT/keystore.properties" <<EOF
+          storeFile=../appsaz-release.jks
+          storePassword=$KS_PASS
+          keyAlias=$KS_ALIAS
+          keyPassword=$KS_PASS
+          EOF
+
+          FORMAT="$(python3 -c "import json;print(json.load(open('manifest.json')).get('format','apk'))")"
+          cd "$ROOT"
+          if [ "$FORMAT" = "apk" ] || [ "$FORMAT" = "both" ]; then
+            callback building compiling 52 "در حال ساخت APK"
+            gradle --no-daemon assembleRelease
+            APK="$(find app/build/outputs/apk/release -name '*.apk' | head -n1)"
+            test -f "$APK"
+            callback building uploading 82 "در حال انتقال APK"
+            curl -fsS -X POST -H "X-AppSaz-Build-Token: $TOKEN" -F "kind=apk" -F "file=@$APK" "${{ inputs.upload_url }}" >/dev/null
+          fi
+          if [ "$FORMAT" = "aab" ] || [ "$FORMAT" = "both" ]; then
+            callback building compiling 66 "در حال ساخت AAB"
+            gradle --no-daemon bundleRelease
+            AAB="$(find app/build/outputs/bundle/release -name '*.aab' | head -n1)"
+            test -f "$AAB"
+            callback building uploading 90 "در حال انتقال AAB"
+            curl -fsS -X POST -H "X-AppSaz-Build-Token: $TOKEN" -F "kind=aab" -F "file=@$AAB" "${{ inputs.upload_url }}" >/dev/null
+          fi
+          cd - >/dev/null
+          trap - ERR
+          callback success done 100 "ساخت با موفقیت انجام شد"
+
+      - name: Notify failure if setup failed
+        if: failure() && steps.appsaz_build.outcome != 'failure'
+        shell: bash
+        run: |
+          echo "::add-mask::$TOKEN"
+          curl -fsS -X POST -H "Content-Type: application/json" -H "X-AppSaz-Build-Token: $TOKEN" \
+            --data '{"status":"failed","stage":"failed","progress":100,"error":"GitHub Actions setup failed"}' "$CALLBACK_URL" >/dev/null || true
