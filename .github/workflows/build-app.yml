@@ -108,20 +108,65 @@ jobs:
           pkg=re.sub(r'[^A-Za-z0-9_.]','',m['package_name'])
           version=re.sub(r'[^0-9A-Za-z._-]','',str(m.get('version_name','1.0.0')))
           repl={'__PACKAGE__':pkg,'__VERSION_CODE__':str(max(1,int(m.get('version_code',1)))),'__VERSION_NAME__':version}
-          for rel in ['app/build.gradle','app/src/main/java/ir/promptall/appsaz/MainActivity.java']:
+          for rel in ['app/build.gradle']:
               p=root/rel; s=p.read_text(encoding='utf-8')
               for a,b in repl.items(): s=s.replace(a,b)
               p.write_text(s,encoding='utf-8')
           (root/'app/src/main/res/values/strings.xml').write_text('<resources>\n<string name="app_name">'+html.escape(m['app_name'],quote=True)+'</string>\n</resources>\n',encoding='utf-8')
-          cfg={k:m.get(k) for k in ['config_url','project_key','website_url','template','primary_color','secondary_color','logo_url','splash_url','branding','features']}
+          cfg={k:m.get(k) for k in ['app_name','config_url','project_key','website_url','connector_rest_base','type','template','primary_color','secondary_color','logo_url','splash_url','branding','features']}
+          cfg['local_logo']='media/logo.webp' if m.get('logo_url') else ''
+          cfg['local_splash']='media/splash.webp' if (m.get('splash_url') or m.get('logo_url')) else ''
           (root/'app/src/main/assets/app-config.json').write_text(json.dumps(cfg,ensure_ascii=False,indent=2),encoding='utf-8')
           PY
 
+          callback building assets 30 "آماده‌سازی آیکون و Splash"
           LOGO_URL="$(python3 -c "import json;print(json.load(open('manifest.json')).get('logo_url') or '')")"
-          if [ -n "$LOGO_URL" ]; then
-            rm -f "$ROOT/app/src/main/res/drawable/ic_launcher.xml"
-            curl -fsSL "$LOGO_URL" -o "$ROOT/app/src/main/res/drawable/ic_launcher.webp"
-          fi
+          SPLASH_URL="$(python3 -c "import json;print(json.load(open('manifest.json')).get('splash_url') or json.load(open('manifest.json')).get('logo_url') or '')")"
+          mkdir -p "$ROOT/app/src/main/assets/www/media"
+          python3 -m pip install --quiet pillow
+          if [ -n "$LOGO_URL" ]; then curl -fsSL "$LOGO_URL" -o /tmp/appsaz-logo; fi
+          if [ -n "$SPLASH_URL" ]; then curl -fsSL "$SPLASH_URL" -o /tmp/appsaz-splash; fi
+          python3 - "$ROOT" <<'PYICON'
+          import sys, pathlib, json
+          from PIL import Image,ImageOps,ImageDraw,ImageFont
+          root=pathlib.Path(sys.argv[1]); m=json.load(open('manifest.json',encoding='utf-8'))
+          def open_img(path):
+              try:return Image.open(path).convert('RGBA')
+              except Exception:return None
+          def hexrgb(v, fallback=(37,99,235)):
+              try:
+                  v=(v or '').lstrip('#');return tuple(int(v[i:i+2],16) for i in (0,2,4))
+              except Exception:return fallback
+          logo=open_img('/tmp/appsaz-logo')
+          splash=open_img('/tmp/appsaz-splash') or logo
+          primary=hexrgb(m.get('primary_color'))
+          media=root/'app/src/main/assets/www/media';media.mkdir(parents=True,exist_ok=True)
+          if logo:
+              l=logo.copy();l.thumbnail((640,640),Image.Resampling.LANCZOS);l.save(media/'logo.webp','WEBP',quality=90,method=6)
+          if not logo:
+              logo=Image.new('RGBA',(1024,1024),primary+(255,));draw=ImageDraw.Draw(logo)
+              try:font=ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',480)
+              except Exception:font=ImageFont.load_default()
+              label='A';box=draw.textbbox((0,0),label,font=font);draw.text(((1024-(box[2]-box[0]))/2,(1024-(box[3]-box[1]))/2-28),label,font=font,fill=(255,255,255,255))
+          master=Image.new('RGBA',(1024,1024),(255,255,255,255))
+          fit=ImageOps.contain(logo,(850,850),Image.Resampling.LANCZOS)
+          master.alpha_composite(fit,((1024-fit.width)//2,(1024-fit.height)//2))
+          sizes={'mipmap-mdpi':48,'mipmap-hdpi':72,'mipmap-xhdpi':96,'mipmap-xxhdpi':144,'mipmap-xxxhdpi':192}
+          for folder,size in sizes.items():
+              d=root/'app/src/main/res'/folder;d.mkdir(parents=True,exist_ok=True)
+              icon=master.resize((size,size),Image.Resampling.LANCZOS)
+              icon.save(d/'ic_launcher.png');icon.save(d/'ic_launcher_round.png')
+          drawable=root/'app/src/main/res/drawable-nodpi';drawable.mkdir(parents=True,exist_ok=True)
+          fg=Image.new('RGBA',(432,432),(0,0,0,0));safe=ImageOps.contain(logo,(300,300),Image.Resampling.LANCZOS);fg.alpha_composite(safe,((432-safe.width)//2,(432-safe.height)//2));fg.save(drawable/'ic_launcher_foreground_image.png')
+          anydpi=root/'app/src/main/res/mipmap-anydpi-v26';anydpi.mkdir(parents=True,exist_ok=True)
+          adaptive='<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android"><background android:drawable="@color/ic_launcher_bg"/><foreground android:drawable="@drawable/ic_launcher_foreground_image"/></adaptive-icon>'
+          (anydpi/'ic_launcher.xml').write_text(adaptive,encoding='utf-8');(anydpi/'ic_launcher_round.xml').write_text(adaptive,encoding='utf-8')
+          colors=root/'app/src/main/res/values/colors.xml';colors.write_text('<resources><color name="ic_launcher_bg">#FFFFFF</color></resources>',encoding='utf-8')
+          old=root/'app/src/main/res/drawable/ic_launcher_foreground.xml'
+          if old.exists(): old.unlink()
+          if splash:
+              sp=splash.copy();sp.thumbnail((1200,1200),Image.Resampling.LANCZOS);sp.save(media/'splash.webp','WEBP',quality=88,method=6)
+          PYICON
 
           callback building signing 36 "آماده‌سازی امضای نسخه"
           KS_EXISTS="$(python3 -c "import json;print('1' if json.load(open('manifest.json')).get('signing',{}).get('keystore_exists') else '0')")"
