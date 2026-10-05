@@ -107,15 +107,20 @@ jobs:
           root=pathlib.Path(sys.argv[1]); m=json.load(open('manifest.json',encoding='utf-8'))
           pkg=re.sub(r'[^A-Za-z0-9_.]','',m['package_name'])
           version=re.sub(r'[^0-9A-Za-z._-]','',str(m.get('version_name','1.0.0')))
-          repl={'__PACKAGE__':pkg,'__VERSION_CODE__':str(max(1,int(m.get('version_code',1)))),'__VERSION_NAME__':version}
-          for rel in ['app/build.gradle']:
+          return_scheme=re.sub(r'[^a-z0-9-]','',str(m.get('payment_return_scheme','')).lower())
+          if not return_scheme.startswith('appsaz-'): return_scheme='appsaz-'+re.sub(r'[^a-z0-9]','',str(m.get('project_key','')).lower())[:24]
+          repl={'__PACKAGE__':pkg,'__VERSION_CODE__':str(max(1,int(m.get('version_code',1)))),'__VERSION_NAME__':version,'__RETURN_SCHEME__':return_scheme}
+          for rel in ['app/build.gradle','app/src/main/AndroidManifest.xml']:
               p=root/rel; s=p.read_text(encoding='utf-8')
               for a,b in repl.items(): s=s.replace(a,b)
               p.write_text(s,encoding='utf-8')
           (root/'app/src/main/res/values/strings.xml').write_text('<resources>\n<string name="app_name">'+html.escape(m['app_name'],quote=True)+'</string>\n</resources>\n',encoding='utf-8')
-          cfg={k:m.get(k) for k in ['app_name','config_url','project_key','website_url','connector_rest_base','type','template','primary_color','secondary_color','logo_url','splash_url','branding','features']}
+          cfg={k:m.get(k) for k in ['app_name','config_url','runtime_contract','project_key','payment_return_scheme','website_url','connector_rest_base','type','template','license_tier','template_access','primary_color','secondary_color','logo_url','splash_url','branding','features']}
           cfg['local_logo']='media/logo.webp' if m.get('logo_url') else ''
           cfg['local_splash']='media/splash.webp' if (m.get('splash_url') or m.get('logo_url')) else ''
+          cfg['logo_url']=''
+          cfg['splash_url']=''
+          cfg['config_url']=''
           (root/'app/src/main/assets/app-config.json').write_text(json.dumps(cfg,ensure_ascii=False,indent=2),encoding='utf-8')
           PY
 
