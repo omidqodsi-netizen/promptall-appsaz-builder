@@ -116,6 +116,7 @@ jobs:
               p.write_text(s,encoding='utf-8')
           (root/'app/src/main/res/values/strings.xml').write_text('<resources>\n<string name="app_name">'+html.escape(m['app_name'],quote=True)+'</string>\n</resources>\n',encoding='utf-8')
           cfg={k:m.get(k) for k in ['app_name','config_url','runtime_contract','project_key','payment_return_scheme','website_url','connector_rest_base','type','template','license_tier','template_access','primary_color','secondary_color','logo_url','splash_url','branding','features']}
+          cfg['splash_is_custom']=True
           cfg['local_logo']='media/logo.webp' if m.get('logo_url') else ''
           cfg['local_splash']='media/splash.webp' if (m.get('splash_url') or m.get('logo_url')) else ''
           cfg['logo_url']=''
@@ -169,8 +170,19 @@ jobs:
           colors=root/'app/src/main/res/values/colors.xml';colors.write_text('<resources><color name="ic_launcher_bg">#FFFFFF</color></resources>',encoding='utf-8')
           old=root/'app/src/main/res/drawable/ic_launcher_foreground.xml'
           if old.exists(): old.unlink()
-          if splash:
-              sp=splash.copy();sp.thumbnail((1200,1200),Image.Resampling.LANCZOS);sp.save(media/'splash.webp','WEBP',quality=88,method=6)
+          if m.get('splash_url') and splash:
+              # Do not turn a portrait splash into a square thumbnail.
+              sp=splash.copy();sp.thumbnail((1200,2400),Image.Resampling.LANCZOS)
+              sp.save(media/'splash.webp','WEBP',quality=88,method=6)
+          else:
+              # Logo-only stores get a full-height branded background, not a tiny
+              # rounded-square logo card in the center of an empty screen.
+              fallback=Image.new('RGBA',(1080,1920),(248,250,255,255))
+              art=splash if splash else logo
+              if art:
+                  centered=ImageOps.contain(art,(520,520),Image.Resampling.LANCZOS)
+                  fallback.alpha_composite(centered,((1080-centered.width)//2,(1920-centered.height)//2))
+              fallback.save(media/'splash.webp','WEBP',quality=87,method=6)
           PYICON
 
           callback building signing 36 "آماده‌سازی امضای نسخه"
